@@ -9,8 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
+import json
+import hashlib
+import re
+from urllib.parse import urlparse, urljoin
+from urllib.request import urlopen, Request
+from html.parser import HTMLParser
+from collections import defaultdict
 
 import math
 import string
@@ -53,6 +59,386 @@ class UserProfile:
     preferred_formats: List[str] = field(default_factory=list)
     available_time_daily: int = 60
     learning_style: str = "balanced"
+
+
+class ContentParser(HTMLParser):
+    """Simple HTML parser to extract text and metadata from web pages."""
+
+    def __init__(self):
+        super().__init__()
+        self.title = ""
+        self.description = ""
+        self.text_content = []
+        self.in_title = False
+        self.in_description = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "title":
+            self.in_title = True
+        elif tag == "meta":
+            attrs_dict = dict(attrs)
+            if attrs_dict.get("name") == "description":
+                self.description = attrs_dict.get("content", "")
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self.in_title = False
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title = data.strip()
+        elif data.strip():
+            self.text_content.append(data.strip())
+
+    def get_text(self) -> str:
+        return " ".join(self.text_content)
+
+
+class ContentCrawler:
+    """Web crawler to dynamically discover learning content."""
+
+    def __init__(self, timeout: int = 10, user_agent: str = "LearnoraBot/1.0"):
+        self.timeout = timeout
+        self.user_agent = user_agent
+        self._visited_urls = set()
+
+    def fetch_url(self, url: str) -> Optional[str]:
+        """Fetch content from a URL."""
+        try:
+            request = Request(url, headers={
+                "User-Agent": self.user_agent,
+                "Accept-Encoding": "gzip, deflate",
+            })
+            with urlopen(request, timeout=self.timeout) as response:
+                if response.status == 200:
+                    content_type = response.headers.get("Content-Type", "")
+                    if "text/html" in content_type or "text/plain" in content_type:
+                        # Read raw bytes
+                        raw_data = response.read()
+                        
+                        # Try to decompress if gzip
+                        import gzip
+                        try:
+                            raw_data = gzip.decompress(raw_data)
+                        except:
+                            pass  # Not gzipped, use as-is
+                        
+                        # Decode to string
+                        return raw_data.decode("utf-8", errors="ignore")
+            return None
+        except Exception as e:
+            print(f"Error fetching {url}: {e}")
+            return None
+
+    def parse_html(self, html_content: str) -> Dict[str, Any]:
+        """Parse HTML content and extract metadata."""
+        parser = ContentParser()
+        parser.feed(html_content)
+        return {
+            "title": parser.title,
+            "description": parser.description,
+            "text": parser.get_text()[:500],  # First 500 chars
+        }
+
+    def extract_tags(self, text: str) -> List[str]:
+        """Extract potential tags from text using simple keyword matching."""
+        keywords = [
+            "python", "javascript", "java", "machine learning", "ai", "data science",
+            "web development", "programming", "tutorial", "course", "beginner",
+            "intermediate", "advanced", "api", "database", "frontend", "backend"
+        ]
+        tags = []
+        text_lower = text.lower()
+        for keyword in keywords:
+            if keyword in text_lower:
+                tags.append(keyword)
+        return tags
+
+    def crawl_url(self, url: str, content_id: Optional[str] = None) -> Optional[LearningContent]:
+        """Crawl a single URL and create a LearningContent object."""
+        if url in self._visited_urls:
+            return None
+        
+        self._visited_urls.add(url)
+        html = self.fetch_url(url)
+        
+        if not html:
+            return None
+        
+        parsed = self.parse_html(html)
+        
+        if not parsed["title"]:
+            return None
+        
+        # Generate checksum for deduplication
+        checksum = hashlib.md5(parsed["text"].encode()).hexdigest()
+        
+        # Extract domain as source
+        domain = urlparse(url).netloc
+        
+        # Estimate difficulty and duration (simple heuristics)
+        text = parsed["text"].lower()
+        difficulty = "intermediate"
+        if "beginner" in text or "introduction" in text or "basics" in text:
+            difficulty = "beginner"
+        elif "advanced" in text or "expert" in text or "master" in text:
+            difficulty = "advanced"
+        
+        # Estimate duration based on text length
+        word_count = len(parsed["text"].split())
+        duration_minutes = max(5, min(120, word_count // 50))
+        
+        tags = self.extract_tags(parsed["title"] + " " + parsed["description"])
+        
+        content_id = content_id or hashlib.md5(url.encode()).hexdigest()[:12]
+        
+        return LearningContent(
+            id=content_id,
+            title=parsed["title"],
+            content_type="article",
+            source=domain,
+            url=url,
+            description=parsed["description"] or parsed["text"][:200],
+            difficulty=difficulty,
+            duration_minutes=duration_minutes,
+            tags=tags,
+            checksum=checksum,
+            created_at=datetime.utcnow(),
+        )
+
+    def crawl_urls(self, urls: List[str]) -> List[LearningContent]:
+        """Crawl multiple URLs and return list of LearningContent objects."""
+        contents = []
+        for url in urls:
+            content = self.crawl_url(url)
+            if content:
+                contents.append(content)
+        return contents
+
+
+class NaturalLanguageProcessor:
+    """Process and understand natural language queries with true NLP capabilities."""
+    
+    def __init__(self):
+        # Synonym mappings for query expansion
+        self.synonyms = {
+            # Programming languages
+            "python": ["python", "py"],
+            "javascript": ["javascript", "js", "ecmascript", "node"],
+            "java": ["java"],
+            "cpp": ["cpp", "c++", "cplusplus"],
+            "csharp": ["c#", "csharp", "dotnet"],
+            
+            # Machine Learning / AI
+            "ml": ["machine learning", "ml"],
+            "ai": ["artificial intelligence", "ai"],
+            "deep learning": ["deep learning", "dl", "neural networks"],
+            "data science": ["data science", "ds", "data analysis"],
+            
+            # Web Development
+            "web dev": ["web development", "web dev", "web programming"],
+            "frontend": ["frontend", "front-end", "client-side", "ui development"],
+            "backend": ["backend", "back-end", "server-side", "api development"],
+            
+            # General terms
+            "programming": ["programming", "coding", "development", "software development"],
+            "tutorial": ["tutorial", "guide", "walkthrough", "how-to", "lesson"],
+            "course": ["course", "class", "training", "workshop"],
+            "beginner": ["beginner", "novice", "starter", "introductory", "basic"],
+            "intermediate": ["intermediate", "medium", "moderate"],
+            "advanced": ["advanced", "expert", "professional", "master"],
+            "learn": ["learn", "study", "master", "understand"],
+        }
+        
+        # Intent patterns
+        self.intent_patterns = {
+            "learning": [
+                r"\b(learn|learning|study|understand|master)\b",
+                r"\b(want to|need to|how to|how do i)\b",
+                r"\b(teach me|show me|help me)\b",
+            ],
+            "tutorial": [
+                r"\b(tutorial|guide|walkthrough|how-?to)\b",
+                r"\b(step by step|example|demo)\b",
+            ],
+            "reference": [
+                r"\b(reference|documentation|docs|manual|api)\b",
+                r"\b(lookup|look up|find|search)\b",
+            ],
+            "project": [
+                r"\b(project|build|create|make|develop)\b",
+                r"\b(application|app|program|software)\b",
+            ],
+        }
+        
+        # Difficulty patterns
+        self.difficulty_patterns = {
+            "beginner": [
+                r"\b(beginner|novice|starter|new|introduction|intro|basic|fundamentals|getting started)\b",
+                r"\b(never|first time|starting out|new to)\b",
+            ],
+            "intermediate": [
+                r"\b(intermediate|medium|moderate|some experience)\b",
+            ],
+            "advanced": [
+                r"\b(advanced|expert|professional|master|in-?depth|complex)\b",
+            ],
+        }
+        
+        # Format patterns
+        self.format_patterns = {
+            "video": [r"\b(video|videos|watch|visual|screencast)\b"],
+            "article": [r"\b(article|articles|read|text|blog|post)\b"],
+            "course": [r"\b(course|courses|class|training)\b"],
+            "tutorial": [r"\b(tutorial|tutorials|guide|walkthrough)\b"],
+            "book": [r"\b(book|books|ebook|e-book)\b"],
+        }
+        
+        # Stop words to filter out
+        self.stop_words = {
+            "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your",
+            "yours", "yourself", "yourselves", "he", "him", "his", "himself", "she",
+            "her", "hers", "herself", "it", "its", "itself", "they", "them", "their",
+            "theirs", "themselves", "what", "which", "who", "whom", "this", "that",
+            "these", "those", "am", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an",
+            "the", "and", "but", "if", "or", "because", "as", "until", "while", "of",
+            "at", "by", "for", "with", "about", "against", "between", "into", "through",
+            "during", "before", "after", "above", "below", "to", "from", "up", "down",
+            "in", "out", "on", "off", "over", "under", "again", "further", "then",
+            "once", "here", "there", "when", "where", "why", "how", "all", "both",
+            "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not",
+            "only", "own", "same", "so", "than", "too", "very", "can", "will", "just",
+            "should", "now",
+        }
+    
+    def expand_query(self, query: str) -> str:
+        """Expand query with synonyms and related terms."""
+        query_lower = query.lower()
+        expanded_terms = set()
+        
+        # Add original query terms
+        for word in query_lower.split():
+            if word not in self.stop_words:
+                expanded_terms.add(word)
+        
+        # Add synonyms
+        for key, synonyms in self.synonyms.items():
+            if key in query_lower or any(syn in query_lower for syn in synonyms):
+                expanded_terms.update(synonyms)
+        
+        # Combine original query with expanded terms
+        expanded = query + " " + " ".join(expanded_terms)
+        return expanded
+    
+    def extract_intent(self, query: str) -> Dict[str, Any]:
+        """Extract user intent from query."""
+        query_lower = query.lower()
+        intents = {}
+        
+        for intent_name, patterns in self.intent_patterns.items():
+            score = 0
+            for pattern in patterns:
+                if re.search(pattern, query_lower, re.IGNORECASE):
+                    score += 1
+            if score > 0:
+                intents[intent_name] = score
+        
+        # Get primary intent (highest score)
+        primary_intent = max(intents.items(), key=lambda x: x[1])[0] if intents else "general"
+        
+        return {
+            "primary": primary_intent,
+            "all_intents": intents,
+            "confidence": max(intents.values()) / len(self.intent_patterns) if intents else 0.0
+        }
+    
+    def extract_entities(self, query: str) -> Dict[str, List[str]]:
+        """Extract topics, difficulty, and format from query."""
+        query_lower = query.lower()
+        entities = {
+            "topics": [],
+            "difficulty": [],
+            "formats": [],
+        }
+        
+        # Extract topics from synonyms
+        for key, synonyms in self.synonyms.items():
+            if any(syn in query_lower for syn in synonyms):
+                if key not in ["learn", "tutorial", "course", "beginner", "intermediate", "advanced"]:
+                    entities["topics"].append(key)
+        
+        # Extract difficulty level
+        for difficulty, patterns in self.difficulty_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, query_lower):
+                    entities["difficulty"].append(difficulty)
+                    break
+        
+        # Extract preferred format
+        for format_type, patterns in self.format_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, query_lower):
+                    entities["formats"].append(format_type)
+                    break
+        
+        return entities
+    
+    def extract_key_terms(self, query: str) -> List[str]:
+        """Extract important terms from query, filtering stop words."""
+        query_lower = query.lower()
+        # Remove punctuation
+        translator = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
+        clean_query = query_lower.translate(translator)
+        
+        # Extract terms, filter stop words
+        terms = [
+            term for term in clean_query.split()
+            if term and term not in self.stop_words and len(term) > 2
+        ]
+        
+        return terms
+    
+    def process_query(self, query: str) -> Dict[str, Any]:
+        """Comprehensive query processing with all NLP features."""
+        return {
+            "original_query": query,
+            "expanded_query": self.expand_query(query),
+            "intent": self.extract_intent(query),
+            "entities": self.extract_entities(query),
+            "key_terms": self.extract_key_terms(query),
+        }
+
+
+class APIContentFetcher:
+    """Fetch content from educational APIs."""
+
+    def __init__(self, api_keys: Optional[Dict[str, str]] = None):
+        self.api_keys = api_keys or {}
+
+    def fetch_youtube_content(self, query: str, max_results: int = 10) -> List[LearningContent]:
+        """Simulate fetching YouTube educational content."""
+        # Note: This is a placeholder. Real implementation would use YouTube Data API
+        print(f"Would fetch YouTube content for: {query}")
+        return []
+
+    def fetch_medium_content(self, query: str, max_results: int = 10) -> List[LearningContent]:
+        """Simulate fetching Medium articles."""
+        # Note: This is a placeholder. Real implementation would use Medium API
+        print(f"Would fetch Medium content for: {query}")
+        return []
+
+    def fetch_github_content(self, query: str, max_results: int = 10) -> List[LearningContent]:
+        """Simulate fetching GitHub repositories and documentation."""
+        # Note: This is a placeholder. Real implementation would use GitHub API
+        print(f"Would fetch GitHub content for: {query}")
+        return []
+
+    def fetch_coursera_content(self, query: str, max_results: int = 10) -> List[LearningContent]:
+        """Simulate fetching Coursera courses."""
+        # Note: This is a placeholder. Real implementation would use Coursera API
+        print(f"Would fetch Coursera content for: {query}")
+        return []
 
 
 class VectorDBManager:
@@ -246,22 +632,69 @@ class VectorDBManager:
 
 
 class LearnoraContentDiscovery:
-    """Thin wrapper that combines search with simple personalization."""
+    """Thin wrapper that combines search with simple personalization, dynamic content discovery, and NLP."""
 
     def __init__(self,
         *,
         vector_db: Optional[VectorDBManager] = None,
         openai_api_key: Optional[str] = None,
         redis_url: Optional[str] = None,
+        enable_crawler: bool = True,
+        enable_api_fetcher: bool = True,
+        enable_nlp: bool = True,
     ) -> None:
         self.vector_db = vector_db or VectorDBManager()
         self.openai_api_key = openai_api_key
         self.redis_url = redis_url
         self._cache: Dict[str, Dict[str, Any]] = {}
+        
+        # Dynamic content discovery components
+        self.crawler = ContentCrawler() if enable_crawler else None
+        self.api_fetcher = APIContentFetcher({"openai": openai_api_key}) if enable_api_fetcher else None
+        self._auto_discovery_enabled = False
+        
+        # Natural Language Processing
+        self.nlp = NaturalLanguageProcessor() if enable_nlp else None
 
     def _cache_key(self, query: str, user_profile: UserProfile, strategy: str) -> str:
         profile_dict = asdict(user_profile)
         return f"{query}|{strategy}|{sorted(profile_dict.items())}"
+
+    def enable_auto_discovery(self, enabled: bool = True) -> None:
+        """Enable or disable automatic content discovery."""
+        self._auto_discovery_enabled = enabled
+
+    def crawl_and_index_urls(self, urls: List[str]) -> int:
+        """Crawl URLs and add discovered content to the index."""
+        if not self.crawler:
+            raise RuntimeError("Crawler is not enabled")
+        
+        contents = self.crawler.crawl_urls(urls)
+        if contents:
+            self.vector_db.add_contents(contents)
+        return len(contents)
+
+    def fetch_and_index_from_apis(self, query: str, sources: Optional[List[str]] = None) -> int:
+        """Fetch content from external APIs and add to index."""
+        if not self.api_fetcher:
+            raise RuntimeError("API fetcher is not enabled")
+        
+        sources = sources or ["youtube", "medium", "github"]
+        all_contents = []
+        
+        for source in sources:
+            if source == "youtube":
+                all_contents.extend(self.api_fetcher.fetch_youtube_content(query))
+            elif source == "medium":
+                all_contents.extend(self.api_fetcher.fetch_medium_content(query))
+            elif source == "github":
+                all_contents.extend(self.api_fetcher.fetch_github_content(query))
+            elif source == "coursera":
+                all_contents.extend(self.api_fetcher.fetch_coursera_content(query))
+        
+        if all_contents:
+            self.vector_db.add_contents(all_contents)
+        return len(all_contents)
 
     def discover_and_personalize(
         self,
@@ -271,16 +704,70 @@ class LearnoraContentDiscovery:
         strategy: str = "hybrid",
         top_k: int = 5,
         refresh_content: bool = False,
+        auto_discover: Optional[bool] = None,
+        discovery_sources: Optional[List[str]] = None,
+        use_nlp: bool = True,
     ) -> Dict[str, Any]:
+        """
+        Discover and personalize content with optional automatic content discovery and NLP.
+        
+        Args:
+            query: Search query (natural language supported)
+            user_profile: User profile for personalization
+            strategy: Search strategy (bm25, dense, or hybrid)
+            top_k: Number of results to return
+            refresh_content: Whether to bypass cache
+            auto_discover: Whether to automatically discover new content (overrides instance setting)
+            discovery_sources: List of sources to discover from (e.g., ["youtube", "medium"])
+            use_nlp: Whether to use NLP processing on the query
+        """
+        # Process query with NLP if enabled
+        nlp_results = None
+        processed_query = query
+        
+        if use_nlp and self.nlp:
+            nlp_results = self.nlp.process_query(query)
+            processed_query = nlp_results["expanded_query"]
+            
+            # Update user profile based on NLP entities
+            entities = nlp_results["entities"]
+            if entities["formats"] and not user_profile.preferred_formats:
+                user_profile.preferred_formats = entities["formats"]
+        
+        # Auto-discover new content if enabled
+        if auto_discover is None:
+            auto_discover = self._auto_discovery_enabled
+        
+        if auto_discover and self.api_fetcher:
+            try:
+                # Use expanded query for better discovery
+                new_count = self.fetch_and_index_from_apis(processed_query, discovery_sources)
+                if new_count > 0:
+                    refresh_content = True  # Force refresh if new content was added
+            except Exception as e:
+                print(f"Auto-discovery failed: {e}")
+        
         if not refresh_content:
-            cached = self._cache.get(self._cache_key(query, user_profile, strategy))
+            cached = self._cache.get(self._cache_key(processed_query, user_profile, strategy))
             if cached is not None:
+                # Add NLP info to cached results if available
+                if nlp_results:
+                    cached["nlp_analysis"] = nlp_results
                 return cached
 
-        ranked = self.vector_db.search(query, top_k=top_k, strategy=strategy)
+        # Search with processed query
+        ranked = self.vector_db.search(processed_query, top_k=top_k, strategy=strategy)
+        
+        # Apply NLP-based filtering if we have entities
+        if nlp_results and nlp_results["entities"]["difficulty"]:
+            preferred_difficulty = nlp_results["entities"]["difficulty"][0]
+            ranked = self._filter_by_difficulty(ranked, preferred_difficulty)
+        
         personalized = self._personalize_results(ranked, user_profile)
+        
         payload = {
             "query": query,
+            "processed_query": processed_query if use_nlp else query,
             "user_id": user_profile.user_id,
             "strategy": strategy,
             "results": personalized,
@@ -289,8 +776,36 @@ class LearnoraContentDiscovery:
                 "returned": len(personalized),
             },
         }
-        self._cache[self._cache_key(query, user_profile, strategy)] = payload
+        
+        # Add NLP analysis to response
+        if nlp_results:
+            payload["nlp_analysis"] = {
+                "intent": nlp_results["intent"],
+                "entities": nlp_results["entities"],
+                "key_terms": nlp_results["key_terms"],
+            }
+        
+        self._cache[self._cache_key(processed_query, user_profile, strategy)] = payload
         return payload
+    
+    def _filter_by_difficulty(
+        self,
+        ranked_results: List[Tuple[LearningContent, float]],
+        preferred_difficulty: str,
+    ) -> List[Tuple[LearningContent, float]]:
+        """Filter and boost results matching preferred difficulty."""
+        filtered = []
+        for content, score in ranked_results:
+            if content.difficulty == preferred_difficulty:
+                # Boost matching difficulty
+                filtered.append((content, score * 1.2))
+            else:
+                # Keep but with lower priority
+                filtered.append((content, score * 0.9))
+        
+        # Re-sort by adjusted scores
+        filtered.sort(key=lambda x: x[1], reverse=True)
+        return filtered
 
     def _personalize_results(
         self,
@@ -362,49 +877,19 @@ def compute_mrr(predictions: List[str], ground_truth_set: Sequence[str]) -> floa
     return 0.0
 
 
-@lru_cache(maxsize=None)
-def load_demo_contents() -> List[LearningContent]:
-    """Provide a deterministic list of demo items for unit tests or demos."""
-
-    now = datetime(2024, 1, 1)
-    return [
-        LearningContent(
-            id="python-intro",
-            title="Introduction to Python",
-            content_type="article",
-            source="demo",
-            url="https://example.com/python-intro",
-            description="Start writing Python programs with hands-on examples.",
-            difficulty="beginner",
-            duration_minutes=20,
-            tags=["python", "programming", "basics"],
-            created_at=now,
-        ),
-        LearningContent(
-            id="python-advanced",
-            title="Advanced Python Patterns",
-            content_type="video",
-            source="demo",
-            url="https://example.com/python-advanced",
-            description="Master decorators, context managers, and metaclasses.",
-            difficulty="advanced",
-            duration_minutes=45,
-            tags=["python", "advanced", "patterns"],
-            created_at=now,
-        ),
-        LearningContent(
-            id="ml-fundamentals",
-            title="Machine Learning Fundamentals",
-            content_type="course",
-            source="demo",
-            url="https://example.com/ml-fundamentals",
-            description="Learn supervised and unsupervised algorithms from scratch.",
-            difficulty="intermediate",
-            duration_minutes=90,
-            tags=["machine learning", "supervised", "unsupervised"],
-            created_at=now,
-        ),
-    ]
+def discover_content_from_web(urls: List[str]) -> List[LearningContent]:
+    """Dynamically discover and parse content from provided URLs.
+    
+    This is a convenience function that creates a crawler and fetches content.
+    
+    Args:
+        urls: List of URLs to crawl
+        
+    Returns:
+        List of discovered LearningContent objects
+    """
+    crawler = ContentCrawler()
+    return crawler.crawl_urls(urls)
 
 
 __all__ = [
@@ -412,7 +897,11 @@ __all__ = [
     "UserProfile",
     "VectorDBManager",
     "LearnoraContentDiscovery",
+    "ContentCrawler",
+    "APIContentFetcher",
+    "ContentParser",
+    "NaturalLanguageProcessor",
     "compute_ndcg",
     "compute_mrr",
-    "load_demo_contents",
+    "discover_content_from_web",
 ]

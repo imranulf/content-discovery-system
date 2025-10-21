@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 
 from Project import (
     LearnoraContentDiscovery,
@@ -7,14 +8,55 @@ from Project import (
     VectorDBManager,
     compute_mrr,
     compute_ndcg,
-    load_demo_contents,
 )
+
+
+def create_test_contents():
+    """Create test content for unit tests."""
+    return [
+        LearningContent(
+            id="python-intro",
+            title="Introduction to Python",
+            content_type="article",
+            source="Test",
+            url="https://test.com/python-intro",
+            description="Learn Python programming basics",
+            difficulty="beginner",
+            duration_minutes=30,
+            tags=["python", "programming", "beginner"],
+            created_at=datetime.now(),
+        ),
+        LearningContent(
+            id="python-advanced",
+            title="Advanced Python Patterns",
+            content_type="video",
+            source="Test",
+            url="https://test.com/python-advanced",
+            description="Master advanced Python programming",
+            difficulty="advanced",
+            duration_minutes=45,
+            tags=["python", "advanced", "patterns"],
+            created_at=datetime.now(),
+        ),
+        LearningContent(
+            id="ml-fundamentals",
+            title="Machine Learning Fundamentals",
+            content_type="course",
+            source="Test",
+            url="https://test.com/ml-fundamentals",
+            description="Introduction to machine learning concepts",
+            difficulty="intermediate",
+            duration_minutes=60,
+            tags=["machine learning", "ML", "data science"],
+            created_at=datetime.now(),
+        ),
+    ]
 
 
 class VectorDBManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.manager = VectorDBManager()
-        self.manager.add_contents(load_demo_contents())
+        self.manager.add_contents(create_test_contents())
 
     def test_bm25_search_returns_relevant_results(self) -> None:
         results = self.manager.search("python programming", strategy="bm25")
@@ -40,7 +82,7 @@ class VectorDBManagerTests(unittest.TestCase):
 class DiscoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         manager = VectorDBManager()
-        manager.add_contents(load_demo_contents())
+        manager.add_contents(create_test_contents())
         self.discovery = LearnoraContentDiscovery(vector_db=manager)
         self.profile = UserProfile(
             user_id="user-1",
